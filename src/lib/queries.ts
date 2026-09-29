@@ -133,19 +133,22 @@ export async function listCandidates(): Promise<CandidateSummary[]> {
   return rows.map((row) => ({ id: row.id, name: row.name }));
 }
 
+/**
+ * The candidate a token belongs to, disabled ones included: sign-in tells a
+ * blocked candidate so, rather than calling a real token unrecognised.
+ */
 export async function findCandidateByToken(
   token: string,
-): Promise<CandidateSummary | null> {
-  const rows = await sql<{ id: string; name: string }[]>`
-    select id, name
+): Promise<(CandidateSummary & { active: boolean }) | null> {
+  const rows = await sql<{ id: string; name: string; active: boolean }[]>`
+    select id, name, active
       from candidates
      where token = ${token}
-       and active
      limit 1
   `;
   const row = rows[0];
   if (!row) return null;
-  return { id: row.id, name: row.name };
+  return { id: row.id, name: row.name, active: row.active };
 }
 
 async function bookingsFor(

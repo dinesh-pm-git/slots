@@ -18,6 +18,13 @@ export async function POST(request: Request) {
     const candidate = await findCandidateByToken(token);
     if (!candidate) return fail("That token was not recognised.", 401);
 
+    // A disabled token is a real one. "Not recognised" would only send them
+    // back to retype it; this tells them who can help. Not cleared from the
+    // throttle, since it is not a successful sign-in.
+    if (!candidate.active) {
+      return fail("You have been blocked. Reach out to a team member.", 403);
+    }
+
     clearAttempts(key);
     await createSession({
       role: "candidate",
