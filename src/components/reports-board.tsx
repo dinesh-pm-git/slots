@@ -214,7 +214,8 @@ function ColumnChart({
 
   return (
     <div role="group" aria-label={label}>
-      <div className="relative ml-7" style={{ height }}>
+      {/* Headroom for the label over the tallest column. */}
+      <div className="relative mt-5 ml-7" style={{ height }}>
         {/* Hairline grid, one step off the card. */}
         {ticks.map((tick) => (
           <div
@@ -245,8 +246,20 @@ function ColumnChart({
                 aria-label={`${column.tip.title}: ${column.tip.lines
                   .map((line) => `${line.label} ${line.value}`)
                   .join(", ")}`}
-                onPointerEnter={() => setActive(index)}
-                onPointerLeave={() => setActive(null)}
+                // A mouse shows the tooltip while it hovers. A finger has no
+                // hover - "leave" fires the moment it lifts - so a tap toggles
+                // the tooltip instead.
+                onPointerEnter={(event) => {
+                  if (event.pointerType === "mouse") setActive(index);
+                }}
+                onPointerLeave={(event) => {
+                  if (event.pointerType === "mouse") setActive(null);
+                }}
+                onPointerUp={(event) => {
+                  if (event.pointerType !== "mouse") {
+                    setActive((current) => (current === index ? null : index));
+                  }
+                }}
                 onFocus={() => setActive(index)}
                 onBlur={() => setActive(null)}
                 className="relative flex h-full min-w-0 flex-1 cursor-default items-end justify-center rounded-md outline-none focus-visible:bg-indigo-50"
