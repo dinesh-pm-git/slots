@@ -43,6 +43,8 @@ export type ReportSession = {
   candidateName: string;
   token: string;
   source: CandidateSource;
+  candidatePhone: string | null;
+  candidateActive: boolean;
   companyName: string;
   sessionType: SessionType;
   status: "booked" | "cancelled";
@@ -113,6 +115,64 @@ export type NoMockLine = Pick<
   | "sessionType"
 >;
 
+/** One candidate's range, for the candidate analysis. */
+export type CandidateLine = {
+  id: string;
+  name: string;
+  token: string;
+  source: CandidateSource;
+  phone: string | null;
+  active: boolean;
+  /** Booked, not cancelled. */
+  sessions: number;
+  held: number;
+  scheduled: number;
+  interviews: number;
+  assessments: number;
+  /** Who they met, one name per company, in the order they first met them. */
+  companies: string[];
+  /** Days with a held session, and how many of those had the mock done. */
+  heldDays: number;
+  mockDays: number;
+  /** Held sessions that went ahead without the mock. */
+  noMock: number;
+  cancelled: number;
+  /** First and last booked (not cancelled) session in the range. */
+  firstDate: string | null;
+  lastDate: string | null;
+};
+
+/** A token issued in the range that has never had a session booked. */
+export type NotBookedLine = {
+  id: string;
+  name: string;
+  token: string;
+  phone: string | null;
+  source: CandidateSource;
+  company: string | null;
+  issuedAt: string;
+};
+
+export type SourceLine = {
+  source: CandidateSource;
+  candidates: number;
+  sessions: number;
+  held: number;
+  heldWithMock: number;
+  cancelled: number;
+};
+
+export type CandidateAnalysis = {
+  /** Everyone with a session - booked or cancelled - in the range. */
+  lines: CandidateLine[];
+  /** How many candidates had 1, 2, 3, 4, and 5 or more sessions. */
+  perCandidate: { sessions: string; candidates: number }[];
+  sources: SourceLine[];
+  /** Tokens issued in the range, disabled ones included. */
+  tokensIssued: number;
+  notBooked: NotBookedLine[];
+};
+
 export type Report = {
   from: string;
   to: string;
@@ -146,6 +206,7 @@ export type Report = {
   panels: PanelLine[];
   controllers: ControllerLine[];
   noMock: NoMockLine[];
+  candidates: CandidateAnalysis;
 };
 
 type SessionRow = {
@@ -159,6 +220,8 @@ type SessionRow = {
   candidate_name: string;
   token: string;
   source: CandidateSource;
+  candidate_phone: string | null;
+  candidate_active: boolean;
   company_name: string;
   session_type: SessionType;
   status: "booked" | "cancelled";
@@ -224,6 +287,8 @@ export async function listReportSessions(
            c.name as candidate_name,
            c.token,
            c.source,
+           c.phone as candidate_phone,
+           c.active as candidate_active,
            b.company_name,
            b.session_type,
            b.status,
@@ -253,6 +318,8 @@ export async function listReportSessions(
     candidateName: row.candidate_name,
     token: row.token,
     source: row.source,
+    candidatePhone: row.candidate_phone,
+    candidateActive: Boolean(row.candidate_active),
     companyName: row.company_name.trim(),
     sessionType: row.session_type,
     status: row.status,
@@ -344,12 +411,177 @@ async function controllerActivity(
   );
 }
 
+/**
+ * Tokens issued in the range, and the ones among them still waiting on a
+ * first booking - the people worth a phone call. "Never booked" means no
+ * session is booked on any date: someone who booked and then cancelled
+ * everything is in the same position as someone who never started. Disabled
+ * tokens are counted as issued but left off the list, since they were
+ * stopped on purpose.
+ */
+async function tokenFollowUp(
+  from: string,
+  to: string,
+): Promise<Pick<CandidateAnalysis, "tokensIssued" | "notBooked">> {
+  const zone = SCHEDULE_TIMEZONE ?? "UTC";
+  const rows = await sql<
+    {
+      id: string;
+      name: string;
+      token: string;
+      phone: string | null;
+      source: CandidateSource;
+      company: string | null;
+      active: boolean;
+      issued_at: string;
+      booked: boolean;
+    }[]
+  >`
+    select c.id, c.name, c.token, c.phone, c.source, c.company, c.active,
+           c.created_at as issued_at,
+           exists (
+             select 1 from bookings b
+              where b.candidate_id = c.id and b.status = 'booked'
+           ) as booked
+      from candidates c
+     where c.created_at >= (${from}::date)::timestamp at time zone ${zone}
+       and c.created_at <  (${to}::date + 1)::timestamp at time zone ${zone}
+     order by c.created_at desc
+  `;
+
+  return {
+    tokensIssued: rows.length,
+    notBooked: rows
+      .filter((row) => row.active && !row.booked)
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        token: row.token,
+        phone: row.phone,
+        source: row.source,
+        company: row.company,
+        issuedAt: new Date(row.issued_at).toISOString(),
+      })),
+  };
+}
+
+/** Folds the range's sessions into one line per candidate. */
+function analyseCandidates(
+  sessions: ReportSession[],
+): Pick<CandidateAnalysis, "lines" | "perCandidate" | "sources"> {
+  // The line, and the sets it is counted from until the fold is done.
+  type Building = {
+    line: CandidateLine;
+    companyKeys: Set<string>;
+    heldDays: Set<string>;
+    mockDays: Set<string>;
+  };
+  const byId = new Map<string, Building>();
+
+  // Sessions arrive in date order, so the first one seen is the earliest.
+  for (const session of sessions) {
+    let building = byId.get(session.candidateId);
+    if (!building) {
+      building = {
+        line: {
+          id: session.candidateId,
+          name: session.candidateName,
+          token: session.token,
+          source: session.source,
+          phone: session.candidatePhone,
+          active: session.candidateActive,
+          sessions: 0,
+          held: 0,
+          scheduled: 0,
+          interviews: 0,
+          assessments: 0,
+          companies: [],
+          heldDays: 0,
+          mockDays: 0,
+          noMock: 0,
+          cancelled: 0,
+          firstDate: null,
+          lastDate: null,
+        },
+        companyKeys: new Set(),
+        heldDays: new Set(),
+        mockDays: new Set(),
+      };
+      byId.set(session.candidateId, building);
+    }
+    const { line } = building;
+
+    if (session.status === "cancelled") {
+      line.cancelled += 1;
+      continue;
+    }
+
+    line.sessions += 1;
+    if (session.sessionType === "Interview") line.interviews += 1;
+    else line.assessments += 1;
+
+    if (session.held) {
+      line.held += 1;
+      building.heldDays.add(session.date);
+      // The mock belongs to the day, so every session that day agrees.
+      if (session.mockDone) building.mockDays.add(session.date);
+      else line.noMock += 1;
+    } else {
+      line.scheduled += 1;
+    }
+
+    const key = companyKey(session.companyName);
+    if (!building.companyKeys.has(key)) {
+      building.companyKeys.add(key);
+      line.companies.push(session.companyName);
+    }
+
+    line.firstDate ??= session.date;
+    line.lastDate = session.date;
+  }
+
+  const lines: CandidateLine[] = [...byId.values()]
+    .map(({ line, heldDays, mockDays }) => ({
+      ...line,
+      heldDays: heldDays.size,
+      mockDays: mockDays.size,
+    }))
+    .sort(
+      (a, b) =>
+        b.sessions - a.sessions ||
+        b.noMock - a.noMock ||
+        a.name.localeCompare(b.name),
+    );
+
+  const booked = lines.filter((line) => line.sessions > 0);
+  const perCandidate = ["1", "2", "3", "4", "5+"].map((label, index) => ({
+    sessions: label,
+    candidates: booked.filter((line) =>
+      index === 4 ? line.sessions >= 5 : line.sessions === index + 1,
+    ).length,
+  }));
+
+  const sources: SourceLine[] = (["Uniq", "Direct"] as const).map((source) => {
+    const mine = lines.filter((line) => line.source === source);
+    return {
+      source,
+      candidates: mine.filter((line) => line.sessions > 0).length,
+      sessions: mine.reduce((sum, line) => sum + line.sessions, 0),
+      held: mine.reduce((sum, line) => sum + line.held, 0),
+      heldWithMock: mine.reduce((sum, line) => sum + line.held - line.noMock, 0),
+      cancelled: mine.reduce((sum, line) => sum + line.cancelled, 0),
+    };
+  });
+
+  return { lines, perCandidate, sources };
+}
+
 export async function buildReport(
   from: string,
   to: string,
   now: Date = new Date(),
 ): Promise<{ report: Report; sessions: ReportSession[] }> {
-  const [sessions, panels, closures, controllers] = await Promise.all([
+  const [sessions, panels, closures, controllers, followUp] = await Promise.all([
     listReportSessions(from, to, now),
     listPanels(),
     sql<{ panel_id: string; closed_on: string }[]>`
@@ -358,6 +590,7 @@ export async function buildReport(
        where closed_on between ${from}::date and ${to}::date
     `,
     controllerActivity(from, to),
+    tokenFollowUp(from, to),
   ]);
 
   const live = sessions.filter((session) => session.status === "booked");
@@ -572,6 +805,7 @@ export async function buildReport(
     panels: panelLines,
     controllers,
     noMock,
+    candidates: { ...analyseCandidates(sessions), ...followUp },
   };
 
   return { report, sessions };

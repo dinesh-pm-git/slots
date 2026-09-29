@@ -20,6 +20,7 @@ const SESSION_HEADERS = [
   "Panel",
   "Candidate",
   "Token",
+  "Candidate phone",
   "Source",
   "Company",
   "Type",
@@ -32,6 +33,14 @@ const SESSION_HEADERS = [
 ];
 
 const yesNo = (value: boolean) => (value ? "Yes" : "No");
+
+/** A moment on the schedule's clock: "30 Sept 2026, 14:05". */
+const whenLabel = (iso: string) =>
+  new Intl.DateTimeFormat(SCHEDULE_LOCALE, {
+    timeZone: SCHEDULE_TIMEZONE,
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(iso));
 
 /**
  * Download the report. Excel carries every table on the page as its own sheet,
@@ -64,6 +73,7 @@ export async function GET(request: Request) {
       row.panelLabel,
       row.candidateName,
       row.token,
+      row.candidatePhone ?? "",
       row.source,
       row.companyName,
       row.sessionType,
@@ -88,11 +98,7 @@ export async function GET(request: Request) {
       });
     }
 
-    const generated = new Intl.DateTimeFormat(SCHEDULE_LOCALE, {
-      timeZone: SCHEDULE_TIMEZONE,
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date());
+    const generated = whenLabel(new Date().toISOString());
 
     const summary: SheetCell[][] = [
       ["Dates", rangeLabel(report.from, report.to)],
@@ -105,6 +111,8 @@ export async function GET(request: Request) {
       ["Candidates", totals.candidates],
       ["Candidates from Uniq", totals.candidatesUniq],
       ["Candidates direct", totals.candidatesDirect],
+      ["Tokens issued", report.candidates.tokensIssued],
+      ["Issued, no session booked yet", report.candidates.notBooked.length],
       ["Companies", totals.companies],
       ["Held with a mock", totals.heldWithMock],
       ["Held without a mock", totals.heldWithoutMock],
@@ -209,6 +217,61 @@ export async function GET(request: Request) {
           line.mocksTicked,
           line.panelsClosed,
           line.signIns,
+        ]),
+      },
+      {
+        name: "Candidates",
+        headers: [
+          "Candidate",
+          "Token",
+          "Phone",
+          "Source",
+          "Token active",
+          "Sessions",
+          "Held",
+          "Still to come",
+          "Interviews",
+          "Assessments",
+          "Companies",
+          "Company names",
+          "Days held",
+          "Days with mock",
+          "Held without mock",
+          "Cancelled",
+          "First session",
+          "Last session",
+        ],
+        rows: report.candidates.lines.map((line) => [
+          line.name,
+          line.token,
+          line.phone ?? "",
+          line.source,
+          yesNo(line.active),
+          line.sessions,
+          line.held,
+          line.scheduled,
+          line.interviews,
+          line.assessments,
+          line.companies.length,
+          line.companies.join(", "),
+          line.heldDays,
+          line.mockDays,
+          line.noMock,
+          line.cancelled,
+          line.firstDate ?? "",
+          line.lastDate ?? "",
+        ]),
+      },
+      {
+        name: "Not booked yet",
+        headers: ["Candidate", "Token", "Phone", "Source", "Company", "Token issued"],
+        rows: report.candidates.notBooked.map((line) => [
+          line.name,
+          line.token,
+          line.phone ?? "",
+          line.source,
+          line.company ?? "",
+          whenLabel(line.issuedAt),
         ]),
       },
       {

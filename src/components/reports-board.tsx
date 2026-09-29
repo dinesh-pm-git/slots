@@ -4,9 +4,11 @@ import { useMemo, useState } from "react";
 
 import CandidateHistory from "@/components/candidate-history";
 import { hoursLabel, percent, rangeLabel } from "@/lib/report-format";
-import type { Report } from "@/lib/reports";
+import type { CandidateAnalysis, CandidateLine, Report } from "@/lib/reports";
+import type { CandidateSource } from "@/lib/types";
 import {
   SCHEDULE_LOCALE,
+  SCHEDULE_TIMEZONE,
   fromDateKey,
   sessionRangeLabel,
   shiftDateKey,
@@ -398,6 +400,364 @@ const WarnIcon = () => (
   </svg>
 );
 
+// --- candidate analysis ------------------------------------------------------------
+
+function SourceBadge({ source }: { source: CandidateSource }) {
+  return (
+    <span
+      className={`rounded px-1.5 py-px text-[10px] font-semibold ${
+        source === "Uniq"
+          ? "bg-indigo-100 text-indigo-700"
+          : "bg-amber-100 text-amber-800"
+      }`}
+    >
+      {source}
+    </span>
+  );
+}
+
+type CandidateSort = "sessions" | "noMock" | "cancelled" | "recent" | "name";
+
+const CANDIDATE_SORTS: { id: CandidateSort; label: string }[] = [
+  { id: "sessions", label: "Most sessions" },
+  { id: "noMock", label: "Most without mock" },
+  { id: "cancelled", label: "Most cancelled" },
+  { id: "recent", label: "Latest session" },
+  { id: "name", label: "Name, A–Z" },
+];
+
+const CANDIDATES_SHOWN = 15;
+
+const issuedDay = (iso: string) =>
+  new Intl.DateTimeFormat(SCHEDULE_LOCALE, {
+    timeZone: SCHEDULE_TIMEZONE,
+    day: "numeric",
+    month: "short",
+  }).format(new Date(iso));
+
+function CandidateAnalysisSection({
+  analysis,
+  sessions,
+  candidates,
+  onOpen,
+}: {
+  analysis: CandidateAnalysis;
+  sessions: number;
+  candidates: number;
+  onOpen: (candidateId: string) => void;
+}) {
+  const [sort, setSort] = useState<CandidateSort>("sessions");
+  const [search, setSearch] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const [spreadTable, setSpreadTable] = useState(false);
+
+  const lines = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    const found = term
+      ? analysis.lines.filter(
+          (line) =>
+            line.name.toLowerCase().includes(term) ||
+            line.token.toLowerCase().includes(term) ||
+            line.companies.some((company) => company.toLowerCase().includes(term)),
+        )
+      : analysis.lines;
+
+    const byName = (a: CandidateLine, b: CandidateLine) =>
+      a.name.localeCompare(b.name);
+    const order: Record<CandidateSort, (a: CandidateLine, b: CandidateLine) => number> = {
+      // The server's order already: most sessions, then most misses.
+      sessions: () => 0,
+      noMock: (a, b) => b.noMock - a.noMock || b.sessions - a.sessions || byName(a, b),
+      cancelled: (a, b) => b.cancelled - a.cancelled || byName(a, b),
+      recent: (a, b) =>
+        (b.lastDate ?? "").localeCompare(a.lastDate ?? "") || byName(a, b),
+      name: byName,
+    };
+    return [...found].sort(order[sort]);
+  }, [analysis.lines, search, sort]);
+
+  const shown = showAll || search.trim() ? lines : lines.slice(0, CANDIDATES_SHOWN);
+  const average = candidates > 0 ? (sessions / candidates).toFixed(1) : "—";
+  const missed = analysis.lines.filter((line) => line.noMock > 0).length;
+
+  const spreadColumns: Column[] = analysis.perCandidate.map((bucket) => ({
+    key: bucket.sessions,
+    tick: [bucket.sessions],
+    segments: [{ name: "Candidates", value: bucket.candidates, swatch: HELD }],
+    tip: {
+      title: `${bucket.sessions} session${bucket.sessions === "1" ? "" : "s"}`,
+      lines: [
+        {
+          label: bucket.candidates === 1 ? "candidate" : "candidates",
+          value: bucket.candidates,
+        },
+      ],
+    },
+  }));
+
+  const field =
+    "rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-900/10";
+
+  return (
+    <section aria-labelledby="candidate-analysis" className="mt-8">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h2
+          id="candidate-analysis"
+          className="text-lg font-bold tracking-tight text-slate-900"
+        >
+          Candidates
+        </h2>
+        <p className="text-sm text-slate-600">
+          {candidates} with sessions &middot; {average} each on average
+          {missed > 0 ? (
+            <>
+              {" · "}
+              <span className="font-medium text-rose-700">
+                {missed} missed a mock
+              </span>
+            </>
+          ) : null}
+        </p>
+      </div>
+
+      <div className="mt-3 grid gap-4 lg:grid-cols-3">
+        <Card
+          title="Sessions per candidate"
+          subtitle="How many candidates had one session, two, and so on"
+          action={<ViewToggle table={spreadTable} onChange={setSpreadTable} />}
+        >
+          {spreadTable ? (
+            <Table
+              head={["Sessions", "Candidates"]}
+              align={["left", "right"]}
+              rows={analysis.perCandidate.map((bucket) => [
+                bucket.sessions,
+                bucket.candidates,
+              ])}
+            />
+          ) : (
+            <ColumnChart
+              label="Candidates by number of sessions"
+              columns={spreadColumns}
+              height={140}
+            />
+          )}
+        </Card>
+
+        <Card title="Uniq and Direct" subtitle="The two sources side by side">
+          <Table
+            head={["", "Candidates", "Sessions", "Each", "Mock cover", "Cancelled"]}
+            align={["left", "right", "right", "right", "right", "right"]}
+            rows={analysis.sources.map((line) => {
+              const cover = percent(line.heldWithMock, line.held);
+              return [
+                line.source,
+                line.candidates,
+                line.sessions,
+                line.candidates > 0
+                  ? (line.sessions / line.candidates).toFixed(1)
+                  : "—",
+                cover === null ? "—" : `${cover}%`,
+                line.cancelled,
+              ];
+            })}
+          />
+        </Card>
+
+        <Card
+          title="Not booked yet"
+          subtitle={
+            analysis.tokensIssued === 0
+              ? "No tokens were issued in these dates."
+              : `${analysis.notBooked.length} of the ${analysis.tokensIssued} token${analysis.tokensIssued === 1 ? "" : "s"} issued in these dates ha${analysis.notBooked.length === 1 ? "s" : "ve"} no session booked.`
+          }
+        >
+          {analysis.notBooked.length > 0 ? (
+            <ul className="thin-scroll -mx-1 max-h-56 divide-y divide-slate-100 overflow-y-auto px-1">
+              {analysis.notBooked.map((line) => (
+                <li
+                  key={line.id}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-0.5 py-2 text-sm"
+                >
+                  <button
+                    type="button"
+                    onClick={() => onOpen(line.id)}
+                    title={`View ${line.name}'s history`}
+                    className="min-w-0 truncate text-left font-semibold text-slate-900 underline decoration-slate-300 underline-offset-2 transition hover:decoration-slate-900"
+                  >
+                    {line.name}
+                  </button>
+                  <span className="font-mono text-xs text-slate-400">
+                    {line.token}
+                  </span>
+                  <SourceBadge source={line.source} />
+                  <span className="ml-auto text-xs text-slate-500">
+                    issued {issuedDay(line.issuedAt)}
+                  </span>
+                  {line.phone ? (
+                    <a
+                      href={`tel:${line.phone}`}
+                      className="w-full text-xs text-indigo-700 tabular-nums hover:underline"
+                    >
+                      {line.phone}
+                    </a>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : analysis.tokensIssued > 0 ? (
+            <p className="text-sm text-slate-500">
+              Every one of them has a session booked.
+            </p>
+          ) : null}
+        </Card>
+      </div>
+
+      <Card
+        className="mt-4"
+        title="Candidate by candidate"
+        subtitle="Everyone with a session in these dates, cancelled ones included. Tap a name for their full history."
+      >
+        <div className="no-print mb-3 flex flex-wrap gap-2">
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search name, token or company"
+            aria-label="Search candidates"
+            className={`${field} min-w-0 flex-1 sm:max-w-xs`}
+          />
+          <select
+            value={sort}
+            onChange={(event) => setSort(event.target.value as CandidateSort)}
+            aria-label="Sort candidates"
+            className={field}
+          >
+            {CANDIDATE_SORTS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {lines.length === 0 ? (
+          <p className="py-6 text-center text-sm text-slate-500">
+            {search.trim() ? "Nobody matches that search." : "No candidates in these dates."}
+          </p>
+        ) : (
+          <div className="thin-scroll overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                  <th className="px-2 py-2 font-medium">Candidate</th>
+                  <th className="px-2 py-2 text-right font-medium">Sessions</th>
+                  <th className="hidden px-2 py-2 font-medium md:table-cell">
+                    Companies
+                  </th>
+                  <th className="px-2 py-2 text-right font-medium">Mock</th>
+                  <th className="px-2 py-2 text-right font-medium">Cancelled</th>
+                  <th className="hidden px-2 py-2 text-right font-medium sm:table-cell">
+                    Last session
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {shown.map((line) => (
+                  <tr key={line.id} className="align-top">
+                    <td className="px-2 py-2">
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onOpen(line.id)}
+                          title={`View ${line.name}'s history`}
+                          className="text-left font-semibold text-slate-900 underline decoration-slate-300 underline-offset-2 transition hover:decoration-slate-900"
+                        >
+                          {line.name}
+                        </button>
+                        <span className="font-mono text-xs text-slate-400">
+                          {line.token}
+                        </span>
+                        <SourceBadge source={line.source} />
+                        {line.active ? null : (
+                          <span className="rounded bg-slate-200 px-1.5 py-px text-[10px] font-semibold text-slate-600">
+                            Disabled
+                          </span>
+                        )}
+                      </div>
+                      {/* On a phone the companies column is gone; say how many. */}
+                      {line.companies.length > 0 ? (
+                        <p className="mt-0.5 text-xs text-slate-500 md:hidden">
+                          {line.companies.length} compan
+                          {line.companies.length === 1 ? "y" : "ies"}
+                        </p>
+                      ) : null}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap tabular-nums">
+                      <span className="font-semibold text-slate-900">
+                        {line.sessions}
+                      </span>
+                      {line.scheduled > 0 ? (
+                        <span className="block text-xs text-slate-500">
+                          {line.scheduled} to come
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="hidden max-w-[18rem] px-2 py-2 text-slate-600 md:table-cell">
+                      <span
+                        className="line-clamp-2"
+                        title={line.companies.join(", ")}
+                      >
+                        {line.companies.join(", ") || "—"}
+                      </span>
+                    </td>
+                    {/* Days with the mock done, of the days they sat sessions:
+                        the mock is once a day, so days are what it is out of. */}
+                    <td className="px-2 py-2 text-right whitespace-nowrap tabular-nums">
+                      {line.heldDays === 0 ? (
+                        <span className="text-slate-400">&mdash;</span>
+                      ) : line.mockDays < line.heldDays ? (
+                        <span
+                          className="font-semibold text-rose-700"
+                          title={`${line.noMock} session${line.noMock === 1 ? "" : "s"} held without a mock`}
+                        >
+                          {line.mockDays} of {line.heldDays} days
+                        </span>
+                      ) : (
+                        <span className="text-slate-700">
+                          {line.mockDays} of {line.heldDays} days
+                        </span>
+                      )}
+                    </td>
+                    <td
+                      className={`px-2 py-2 text-right tabular-nums ${line.cancelled > 0 ? "text-slate-700" : "text-slate-400"}`}
+                    >
+                      {line.cancelled}
+                    </td>
+                    <td className="hidden px-2 py-2 text-right whitespace-nowrap text-slate-600 sm:table-cell">
+                      {line.lastDate ? shortDate(line.lastDate) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {!search.trim() && lines.length > CANDIDATES_SHOWN ? (
+          <button
+            type="button"
+            onClick={() => setShowAll((open) => !open)}
+            className="no-print mt-3 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+          >
+            {showAll ? `Show the first ${CANDIDATES_SHOWN}` : `Show all ${lines.length}`}
+          </button>
+        ) : null}
+      </Card>
+    </section>
+  );
+}
+
 // --- the page -----------------------------------------------------------------
 
 const COMPANIES_SHOWN = 10;
@@ -727,6 +1087,13 @@ export default function ReportsBoard() {
                   )}
                 </Card>
               </div>
+
+              <CandidateAnalysisSection
+                analysis={report.candidates}
+                sessions={totals.sessions}
+                candidates={totals.candidates}
+                onOpen={setHistoryId}
+              />
 
               {/* The misses: sessions that went ahead without a mock. */}
               <Card
