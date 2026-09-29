@@ -1,4 +1,6 @@
+import { groupCompanies, type CompanyGroups } from "@/lib/company-match";
 import { sql } from "@/lib/db";
+import { phoneKey } from "@/lib/phone";
 import { listPanels } from "@/lib/queries";
 import {
   SCHEDULE_TIMEZONE,
@@ -45,7 +47,10 @@ export type ReportSession = {
   source: CandidateSource;
   candidatePhone: string | null;
   candidateActive: boolean;
+  /** As typed on the booking. */
   companyName: string;
+  /** The company it counts as, once similar spellings are merged. */
+  companyGroup: string;
   sessionType: SessionType;
   status: "booked" | "cancelled";
   bookedBy: "candidate" | "controller";
@@ -70,8 +75,27 @@ export type TimelineBucket = {
   noMock: number;
 };
 
+/** A recruiter as given on bookings: one person, however often they were. */
+export type RecruiterContact = {
+  phone: string | null;
+  email: string | null;
+  /** Bookings - kept or cancelled - that gave this contact. */
+  sessions: number;
+  /** The latest session it was given for. */
+  lastDate: string;
+  lastSlotIndex: number;
+  lastCandidate: string;
+};
+
 export type CompanyLine = {
   name: string;
+  /** Latest first. */
+  contacts: RecruiterContact[];
+  /**
+   * Other spellings counted as this company - "virtuval tech guru" under
+   * "Virtual Tech Gurus" - so a merge is visible and a wrong one noticed.
+   */
+  aliases: string[];
   sessions: number;
   interviews: number;
   assessments: number;
@@ -321,6 +345,8 @@ export async function listReportSessions(
     candidatePhone: row.candidate_phone,
     candidateActive: Boolean(row.candidate_active),
     companyName: row.company_name.trim(),
+    // Set properly by buildReport, which sees every spelling in the range.
+    companyGroup: row.company_name.trim(),
     sessionType: row.session_type,
     status: row.status,
     bookedBy: row.booked_by,
@@ -333,13 +359,6 @@ export async function listReportSessions(
   }));
 }
 
-/**
- * "TCS", "tcs" and "T.C.S" are one company. Only letters and digits count, so
- * the report groups spellings the booking form let through separately.
- */
-function companyKey(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "") || name.toLowerCase();
-}
 
 /** Monday of the week a date falls in. */
 function weekStart(key: string): string {
@@ -468,6 +487,7 @@ async function tokenFollowUp(
 /** Folds the range's sessions into one line per candidate. */
 function analyseCandidates(
   sessions: ReportSession[],
+  groups: CompanyGroups,
 ): Pick<CandidateAnalysis, "lines" | "perCandidate" | "sources"> {
   // The line, and the sets it is counted from until the fold is done.
   type Building = {
@@ -530,10 +550,10 @@ function analyseCandidates(
       line.scheduled += 1;
     }
 
-    const key = companyKey(session.companyName);
-    if (!building.companyKeys.has(key)) {
-      building.companyKeys.add(key);
-      line.companies.push(session.companyName);
+    const company = groups.idOf(session.companyName);
+    if (!building.companyKeys.has(company)) {
+      building.companyKeys.add(company);
+      line.companies.push(groups.nameOf(company));
     }
 
     line.firstDate ??= session.date;
@@ -574,6 +594,85 @@ function analyseCandidates(
   });
 
   return { lines, perCandidate, sources };
+}
+
+/**
+ * Each company's recruiters, latest first.
+ *
+ * The same person is often typed a little differently from one booking to
+ * the next, so two entries are one contact when they share an email (in any
+ * case) or a phone number (however it is spaced or prefixed). Their latest
+ * phone and email are the ones kept: a recruiter who changed numbers is
+ * reached on the new one.
+ */
+function recruiterContacts(
+  sessions: ReportSession[],
+  groups: CompanyGroups,
+): Map<string, RecruiterContact[]> {
+  // The contact, and what it is recognised by when it turns up again.
+  type Building = {
+    contact: RecruiterContact;
+    phoneKey: string | null;
+    emailKey: string | null;
+  };
+  const byCompany = new Map<string, Building[]>();
+
+  // Sessions arrive in date order, so each one seen is the latest so far.
+  for (const session of sessions) {
+    const phone = session.recruiterPhone?.trim() || null;
+    const email = session.recruiterEmail?.trim() || null;
+    if (!phone && !email) continue;
+    const phoneMatch = phone ? phoneKey(phone) : null;
+    const emailMatch = email ? email.toLowerCase() : null;
+
+    const company = groups.idOf(session.companyName);
+    const list = byCompany.get(company) ?? [];
+    let known = list.find(
+      (entry) =>
+        (emailMatch !== null && entry.emailKey === emailMatch) ||
+        (phoneMatch !== null && entry.phoneKey === phoneMatch),
+    );
+    if (!known) {
+      known = {
+        contact: {
+          phone: null,
+          email: null,
+          sessions: 0,
+          lastDate: session.date,
+          lastSlotIndex: session.slotIndex,
+          lastCandidate: session.candidateName,
+        },
+        phoneKey: null,
+        emailKey: null,
+      };
+      list.push(known);
+      byCompany.set(company, list);
+    }
+
+    const { contact } = known;
+    contact.sessions += 1;
+    contact.lastDate = session.date;
+    contact.lastSlotIndex = session.slotIndex;
+    contact.lastCandidate = session.candidateName;
+    if (phone) {
+      contact.phone = phone;
+      known.phoneKey = phoneMatch;
+    }
+    if (email) {
+      contact.email = email;
+      known.emailKey = emailMatch;
+    }
+  }
+
+  const latestFirst = (a: RecruiterContact, b: RecruiterContact) =>
+    b.lastDate.localeCompare(a.lastDate) || b.lastSlotIndex - a.lastSlotIndex;
+
+  return new Map(
+    [...byCompany].map(([company, list]) => [
+      company,
+      list.map((entry) => entry.contact).sort(latestFirst),
+    ]),
+  );
 }
 
 export async function buildReport(
@@ -621,9 +720,17 @@ export async function buildReport(
     hours.set(Math.floor(slotStartMinutes(index) / 60), 0);
   }
 
+  // One company however it was spelled: "virtuval tech guru" is counted as
+  // "Virtual Tech Gurus". See lib/company-match.ts for what counts as similar.
+  const groups = groupCompanies(sessions.map((session) => session.companyName));
+  for (const session of sessions) {
+    session.companyGroup = groups.nameOf(groups.idOf(session.companyName));
+  }
+  const contacts = recruiterContacts(sessions, groups);
+
   const companies = new Map<
     string,
-    CompanyLine & { spellings: Map<string, number>; people: Set<string> }
+    Omit<CompanyLine, "name" | "aliases" | "contacts"> & { people: Set<string> }
   >();
   const candidates = new Map<string, CandidateSource>();
   const activeDays = new Set<string>();
@@ -637,18 +744,16 @@ export async function buildReport(
 
   for (const session of sessions) {
     const point = timeline.get(bucketOf(session.date));
-    const key = companyKey(session.companyName);
+    const key = groups.idOf(session.companyName);
     let company = companies.get(key);
     if (!company) {
       company = {
-        name: session.companyName,
         sessions: 0,
         interviews: 0,
         assessments: 0,
         candidates: 0,
         noMock: 0,
         cancelled: 0,
-        spellings: new Map(),
         people: new Set(),
       };
       companies.set(key, company);
@@ -679,10 +784,6 @@ export async function buildReport(
     else company.assessments += 1;
     if (missedMock) company.noMock += 1;
     company.people.add(session.candidateId);
-    company.spellings.set(
-      session.companyName,
-      (company.spellings.get(session.companyName) ?? 0) + 1,
-    );
 
     const panel = panelStats.get(session.panelId) ?? { sessions: 0, halfHours: 0 };
     panel.sessions += 1;
@@ -728,20 +829,13 @@ export async function buildReport(
     };
   });
 
-  const companyLines: CompanyLine[] = [...companies.values()]
-    .filter((company) => company.sessions > 0 || company.cancelled > 0)
-    .map((company) => {
-      // Shown under the spelling used most; ties go to the first one seen.
-      let name = company.name;
-      let best = 0;
-      for (const [spelling, count] of company.spellings) {
-        if (count > best) {
-          best = count;
-          name = spelling;
-        }
-      }
+  const companyLines: CompanyLine[] = [...companies]
+    .filter(([, company]) => company.sessions > 0 || company.cancelled > 0)
+    .map(([id, company]) => {
       return {
-        name,
+        name: groups.nameOf(id),
+        contacts: contacts.get(id) ?? [],
+        aliases: groups.aliasesOf(id),
         sessions: company.sessions,
         interviews: company.interviews,
         assessments: company.assessments,
@@ -768,7 +862,7 @@ export async function buildReport(
       candidateId: session.candidateId,
       candidateName: session.candidateName,
       token: session.token,
-      companyName: session.companyName,
+      companyName: session.companyGroup,
       sessionType: session.sessionType,
     }))
     // Most recent first: yesterday's misses are the ones still worth chasing.
@@ -805,7 +899,7 @@ export async function buildReport(
     panels: panelLines,
     controllers,
     noMock,
-    candidates: { ...analyseCandidates(sessions), ...followUp },
+    candidates: { ...analyseCandidates(sessions, groups), ...followUp },
   };
 
   return { report, sessions };

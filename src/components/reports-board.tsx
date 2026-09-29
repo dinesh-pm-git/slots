@@ -768,6 +768,8 @@ export default function ReportsBoard() {
   const [dayTable, setDayTable] = useState(false);
   const [hourTable, setHourTable] = useState(false);
   const [allCompanies, setAllCompanies] = useState(false);
+  // Companies whose full contact list is open, beyond the first two.
+  const [openContacts, setOpenContacts] = useState<Set<string>>(new Set());
   const [historyId, setHistoryId] = useState<string | null>(null);
 
   const query = useMemo(() => {
@@ -778,7 +780,7 @@ export default function ReportsBoard() {
   }, [range]);
 
   // A report changes slowly; once a minute keeps "held" honest through a day.
-  const { data, error, loading } = usePolledResource<Report>(
+  const { data, error, loading, refresh } = usePolledResource<Report>(
     `/api/reports${query ? `?${query}` : ""}`,
     60_000,
   );
@@ -799,8 +801,8 @@ export default function ReportsBoard() {
     setRange((current) => ({ ...current, [end]: value }));
   }
 
-  const download = (format: "xlsx" | "csv") =>
-    `/api/reports/export?format=${format}${query ? `&${query}` : ""}`;
+  const download = (format: "xlsx" | "csv", kind: "report" | "contacts" = "report") =>
+    `/api/reports/export?format=${format}${kind === "contacts" ? "&kind=contacts" : ""}${query ? `&${query}` : ""}`;
 
   const field =
     "rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-900/10";
@@ -1207,7 +1209,24 @@ export default function ReportsBoard() {
                 <Card
                   className="lg:col-span-2"
                   title="Companies"
-                  subtitle={`${totals.companies} compan${totals.companies === 1 ? "y" : "ies"}, busiest first. Spellings that differ only in case or spacing count as one.`}
+                  subtitle={`${totals.companies} compan${totals.companies === 1 ? "y" : "ies"}, busiest first, with their recruiters latest first. Similar spellings count as one company and are listed under its name.`}
+                  action={
+                    <div className="no-print flex gap-1.5">
+                      <a
+                        href={download("xlsx", "contacts")}
+                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700"
+                      >
+                        Download contacts
+                      </a>
+                      <a
+                        href={download("csv", "contacts")}
+                        aria-label="Download contacts as CSV"
+                        className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                      >
+                        CSV
+                      </a>
+                    </div>
+                  }
                 >
                   <div className="thin-scroll overflow-x-auto">
                     <table className="w-full text-sm">
@@ -1229,8 +1248,79 @@ export default function ReportsBoard() {
                       <tbody className="divide-y divide-slate-100">
                         {companiesShown.map((company) => (
                           <tr key={company.name}>
-                            <td className="max-w-[10rem] truncate px-2 py-1.5 font-medium text-slate-900 sm:max-w-[16rem]" title={company.name}>
-                              {company.name}
+                            <td className="max-w-[10rem] px-2 py-1.5 sm:max-w-[16rem]">
+                              <span
+                                className="block truncate font-medium text-slate-900"
+                                title={company.name}
+                              >
+                                {company.name}
+                              </span>
+                              {/* The spellings merged into this line, so a
+                                  wrong merge is plain to see. */}
+                              {company.aliases.length > 0 ? (
+                                <span
+                                  className="block truncate text-xs text-slate-400"
+                                  title={`Also written as: ${company.aliases.join(", ")}`}
+                                >
+                                  also {company.aliases.join(", ")}
+                                </span>
+                              ) : null}
+                              {company.contacts.length > 0 ? (
+                                <ul className="mt-1 space-y-0.5">
+                                  {(openContacts.has(company.name)
+                                    ? company.contacts
+                                    : company.contacts.slice(0, 2)
+                                  ).map((contact) => (
+                                    <li
+                                      key={`${contact.phone}|${contact.email}`}
+                                      className="flex flex-wrap items-baseline gap-x-2 text-xs"
+                                    >
+                                      {contact.phone ? (
+                                        <a
+                                          href={`tel:${contact.phone}`}
+                                          className="text-indigo-700 tabular-nums hover:underline"
+                                        >
+                                          {contact.phone}
+                                        </a>
+                                      ) : null}
+                                      {contact.email ? (
+                                        <a
+                                          href={`mailto:${contact.email}`}
+                                          className="break-all text-indigo-700 hover:underline"
+                                        >
+                                          {contact.email}
+                                        </a>
+                                      ) : null}
+                                      <span
+                                        className="text-slate-400"
+                                        title={`Last given for ${contact.lastCandidate}`}
+                                      >
+                                        {shortDate(contact.lastDate)}
+                                      </span>
+                                    </li>
+                                  ))}
+                                  {company.contacts.length > 2 ? (
+                                    <li>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setOpenContacts((current) => {
+                                            const next = new Set(current);
+                                            if (next.has(company.name)) next.delete(company.name);
+                                            else next.add(company.name);
+                                            return next;
+                                          })
+                                        }
+                                        className="no-print text-xs font-medium text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-800"
+                                      >
+                                        {openContacts.has(company.name)
+                                          ? "Show fewer"
+                                          : `+${company.contacts.length - 2} more`}
+                                      </button>
+                                    </li>
+                                  ) : null}
+                                </ul>
+                              ) : null}
                             </td>
                             <td className="px-2 py-1.5">
                               {/* The number, with its length beside it. */}
@@ -1322,6 +1412,7 @@ export default function ReportsBoard() {
         <CandidateHistory
           candidateId={historyId}
           onClose={() => setHistoryId(null)}
+          onChanged={refresh}
         />
       ) : null}
     </div>

@@ -811,6 +811,7 @@ export default function CandidatesBoard() {
         <CandidateHistory
           candidateId={historyId}
           onClose={() => setHistoryId(null)}
+          onChanged={refresh}
         />
       ) : null}
     </div>

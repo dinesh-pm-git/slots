@@ -1,6 +1,6 @@
 import { fail, forbidden, serverError, unauthorized } from "@/lib/http";
 import { percent, rangeLabel } from "@/lib/report-format";
-import { buildReport, resolveReportRange } from "@/lib/reports";
+import { buildReport, resolveReportRange, type Report } from "@/lib/reports";
 import { getSession, isController } from "@/lib/session";
 import {
   SCHEDULE_LOCALE,
@@ -23,6 +23,7 @@ const SESSION_HEADERS = [
   "Candidate phone",
   "Source",
   "Company",
+  "Company (grouped)",
   "Type",
   "Status",
   "Booked by",
@@ -31,6 +32,61 @@ const SESSION_HEADERS = [
   "Mock done",
   "Held",
 ];
+
+const CONTACT_HEADERS = [
+  "Company",
+  "Recruiter phone",
+  "Recruiter email",
+  "Last session",
+  "Time",
+  "Last candidate",
+  "Sessions",
+];
+
+/** Every company's recruiters in one list, the latest session first. */
+function contactRows(report: Report): SheetCell[][] {
+  return report.companies
+    .flatMap((company) =>
+      company.contacts.map((contact) => ({ company: company.name, ...contact })),
+    )
+    .sort(
+      (a, b) =>
+        b.lastDate.localeCompare(a.lastDate) ||
+        b.lastSlotIndex - a.lastSlotIndex ||
+        a.company.localeCompare(b.company),
+    )
+    .map((row) => [
+      row.company,
+      row.phone ?? "",
+      row.email ?? "",
+      row.lastDate,
+      slotStartLabel(row.lastSlotIndex),
+      row.lastCandidate,
+      row.sessions,
+    ]);
+}
+
+// attachment + the filename is what makes the browser save rather than render.
+function csvResponse(filename: string, headers: string[], rows: SheetCell[][]) {
+  return new Response(buildCsv(headers, rows), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function xlsxResponse(filename: string, sheets: Sheet[]) {
+  return new Response(buildWorkbook(sheets) as unknown as BodyInit, {
+    headers: {
+      "Content-Type":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
 
 const yesNo = (value: boolean) => (value ? "Yes" : "No");
 
@@ -45,7 +101,8 @@ const whenLabel = (iso: string) =>
 /**
  * Download the report. Excel carries every table on the page as its own sheet,
  * plus every session in the range; CSV is that session list alone, since a
- * CSV file holds one table. Controller only.
+ * CSV file holds one table. `kind=contacts` is the recruiter contacts on
+ * their own, latest first, in either format. Controller only.
  */
 export async function GET(request: Request) {
   try {
@@ -59,11 +116,26 @@ export async function GET(request: Request) {
       return fail("Format must be csv or xlsx.", 400);
     }
 
+    const kind = (params.get("kind") ?? "report").toLowerCase();
+    if (kind !== "report" && kind !== "contacts") {
+      return fail("Kind must be report or contacts.", 400);
+    }
+
     const range = await resolveReportRange(params);
     if ("error" in range) return fail(range.error, 400);
 
     const { report, sessions } = await buildReport(range.from, range.to);
     const { totals } = report;
+
+    if (kind === "contacts") {
+      const filename = `recruiter-contacts-${range.from}-to-${range.to}.${format}`;
+      const rows = contactRows(report);
+      return format === "csv"
+        ? csvResponse(filename, CONTACT_HEADERS, rows)
+        : xlsxResponse(filename, [
+            { name: "Recruiter contacts", headers: CONTACT_HEADERS, rows },
+          ]);
+    }
 
     const sessionRows: SheetCell[][] = sessions.map((row) => [
       row.date,
@@ -76,6 +148,7 @@ export async function GET(request: Request) {
       row.candidatePhone ?? "",
       row.source,
       row.companyName,
+      row.companyGroup,
       row.sessionType,
       row.status === "booked" ? "Booked" : "Cancelled",
       row.bookedBy === "candidate" ? "Candidate" : "Controller",
@@ -86,16 +159,9 @@ export async function GET(request: Request) {
     ]);
 
     const filename = `report-${range.from}-to-${range.to}.${format}`;
-    const disposition = `attachment; filename="${filename}"`;
 
     if (format === "csv") {
-      return new Response(buildCsv(SESSION_HEADERS, sessionRows), {
-        headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": disposition,
-          "Cache-Control": "no-store",
-        },
-      });
+      return csvResponse(filename, SESSION_HEADERS, sessionRows);
     }
 
     const generated = whenLabel(new Date().toISOString());
@@ -166,6 +232,7 @@ export async function GET(request: Request) {
           "Candidates",
           "Without mock",
           "Cancelled",
+          "Also written as",
         ],
         rows: report.companies.map((company) => [
           company.name,
@@ -175,6 +242,7 @@ export async function GET(request: Request) {
           company.candidates,
           company.noMock,
           company.cancelled,
+          company.aliases.join(", "),
         ]),
       },
       {
@@ -287,18 +355,15 @@ export async function GET(request: Request) {
           line.panelLabel,
         ]),
       },
+      {
+        name: "Recruiter contacts",
+        headers: CONTACT_HEADERS,
+        rows: contactRows(report),
+      },
       { name: "Sessions", headers: SESSION_HEADERS, rows: sessionRows },
     ];
 
-    const workbook = buildWorkbook(sheets);
-    return new Response(workbook as unknown as BodyInit, {
-      headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": disposition,
-        "Cache-Control": "no-store",
-      },
-    });
+    return xlsxResponse(filename, sheets);
   } catch (error) {
     return serverError(error);
   }

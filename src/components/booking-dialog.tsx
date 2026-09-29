@@ -87,6 +87,48 @@ export default function BookingDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // One company name offered while typing, so "virtuval tech guru" becomes
+  // "Virtual Tech Gurus" before it is ever saved. Asked for once the typing
+  // pauses, and kept with the text it answers, so a reply that arrives after
+  // more typing is simply ignored.
+  const [suggested, setSuggested] = useState<{
+    typed: string;
+    name: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    const typed = companyName.trim();
+    if (typed.replace(/[^a-z0-9]/gi, "").length < 2) return;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `/api/companies/suggest?q=${encodeURIComponent(typed)}`,
+          { signal: controller.signal, cache: "no-store" },
+        );
+        if (!response.ok) return;
+        const body = (await response.json()) as { suggestion?: string | null };
+        setSuggested({ typed, name: body.suggestion ?? null });
+      } catch {
+        // Aborted by more typing, or offline: no suggestion is the fallback.
+      }
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [companyName]);
+
+  const suggestion =
+    suggested &&
+    suggested.typed === companyName.trim() &&
+    suggested.name &&
+    suggested.name !== companyName.trim()
+      ? suggested.name
+      : null;
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -347,8 +389,25 @@ export default function BookingDialog({
               value={companyName}
               onChange={(event) => setCompanyName(event.target.value)}
               placeholder="e.g. Northwind Systems"
+              autoComplete="off"
+              aria-describedby={suggestion ? "companyName-suggestion" : undefined}
               className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-900/10"
             />
+            {/* One suggestion at most: a tap takes it, typing on ignores it. */}
+            {suggestion ? (
+              <button
+                id="companyName-suggestion"
+                type="button"
+                onClick={() => setCompanyName(suggestion)}
+                aria-label={`Use company name ${suggestion}`}
+                className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-left text-sm text-indigo-900 transition hover:bg-indigo-100 active:scale-[0.99] sm:py-1"
+              >
+                <span className="shrink-0 text-xs text-indigo-600">
+                  Use
+                </span>
+                <span className="truncate font-semibold">{suggestion}</span>
+              </button>
+            ) : null}
           </div>
 
           <fieldset>
