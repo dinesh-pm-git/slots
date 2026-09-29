@@ -433,6 +433,32 @@ export async function insertCandidate(input: {
   return rows[0].id;
 }
 
+/** Enough about an existing candidate to point a controller at them. */
+export type PhoneHolder = {
+  id: string;
+  token: string;
+  name: string;
+  active: boolean;
+};
+
+/**
+ * Who already holds a phone number, disabled tokens included: a disabled
+ * candidate is still that person, and gets re-enabled rather than duplicated.
+ * `key` is phoneKey() of the number, matched against candidates.phone_key.
+ */
+export async function findCandidateByPhoneKey(
+  key: string,
+): Promise<PhoneHolder | null> {
+  const rows = await sql<PhoneHolder[]>`
+    select id, token, name, active
+      from candidates
+     where phone_key = ${key}
+     order by created_at
+     limit 1
+  `;
+  return rows[0] ?? null;
+}
+
 export async function setCandidateActive(
   id: string,
   active: boolean,

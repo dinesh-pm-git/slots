@@ -56,7 +56,11 @@ const PEOPLE = [
   { name: "Meera Krishnan", phone: "+91 98400 10006" },
 ];
 
-/** Four-character tokens collide occasionally; retry rather than fail. */
+/**
+ * Four-character tokens collide occasionally; retry rather than fail. A phone
+ * number is one candidate, so a number that is already registered is skipped
+ * and null returned.
+ */
 async function insertWithToken(person) {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const token = generateToken();
@@ -67,6 +71,7 @@ async function insertWithToken(person) {
       `;
       return token;
     } catch (error) {
+      if (error.constraint_name === "candidates_phone_unique") return null;
       if (error.code === "23505") continue;
       throw error;
     }
@@ -127,12 +132,21 @@ try {
     console.log("\nRe-run with -- --force to add another batch.");
   } else {
     const created = [];
+    const skipped = [];
     for (const person of PEOPLE) {
-      created.push({ token: await insertWithToken(person), ...person });
+      const token = await insertWithToken(person);
+      if (token) created.push({ token, ...person });
+      else skipped.push(person);
     }
     console.log(`\nSeeded ${created.length} candidates:\n`);
     for (const row of created) {
       console.log(`  ${row.token}  ${row.name}`);
+    }
+    if (skipped.length > 0) {
+      console.log(
+        `\nSkipped ${skipped.length} whose phone number is already registered: ` +
+          skipped.map((person) => person.name).join(", "),
+      );
     }
   }
 

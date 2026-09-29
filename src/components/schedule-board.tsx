@@ -776,11 +776,15 @@ export default function ScheduleBoard({
                     }
                     setMovingId(isMoving ? null : booking.id);
                   };
+                  // The session has happened and no mock was ticked off for
+                  // that candidate that day. Ticking one late on the Mock page
+                  // clears this on the next poll, as it does the chevrons.
+                  const noMock = past && booking.needsMock;
                   return (
                     <div
                       key={key}
                       style={placement}
-                      className={`border-b border-slate-100 max-sm:p-0.5 ${zoom.padding} ${past ? "bg-slate-50" : ""}`}
+                      className={`relative isolate border-b border-slate-100 max-sm:p-0.5 ${zoom.padding} ${past ? "bg-slate-50" : ""}`}
                     >
                       <div
                         draggable={editing && !busy && !past}
@@ -800,7 +804,7 @@ export default function ScheduleBoard({
                             activate();
                           }
                         }}
-                        title={`${booking.candidateName} / ${booking.companyName} / ${booking.sessionType} / ${sessionRangeLabel(booking.slotIndex, booking.slotCount)}`}
+                        title={`${booking.candidateName} / ${booking.companyName} / ${booking.sessionType} / ${sessionRangeLabel(booking.slotIndex, booking.slotCount)}${noMock ? " / No mock" : ""}`}
                         className={`group relative isolate flex h-full flex-col overflow-hidden rounded-lg border py-1 pr-1 pl-2.5 shadow-sm transition sm:rounded-xl sm:py-1.5 sm:pr-2 sm:pl-3.5 ${hue.card} ${
                           past
                             ? "cursor-pointer opacity-60 saturate-50"
@@ -908,6 +912,17 @@ export default function ScheduleBoard({
                           {booking.companyName}
                         </p>
                       </div>
+
+                      {/* Stamped over the chip rather than inside it: the chip
+                          of a finished session is faded, and this is the one
+                          thing on it that still wants attention, so it sits
+                          outside the fade at full strength. It lets taps
+                          through to the chip underneath. */}
+                      {noMock ? (
+                        <span className="pointer-events-none absolute top-1/2 right-1 z-10 -translate-y-1/2 -rotate-6 rounded-md border-[1.5px] border-rose-500 bg-white/90 px-1 py-px text-[8px] leading-none font-black tracking-[0.14em] whitespace-nowrap text-rose-600 uppercase shadow-sm sm:right-3 sm:border-2 sm:px-2 sm:py-0.5 sm:text-[11px]">
+                          No mock
+                        </span>
+                      ) : null}
                     </div>
                   );
                 }

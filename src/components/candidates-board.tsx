@@ -20,6 +20,16 @@ type CandidateRecord = {
 
 type Filter = "all" | "active" | "disabled";
 
+/** Who already holds a number the form was given. */
+type PhoneHolder = {
+  id: string;
+  token: string;
+  name: string;
+  active: boolean;
+  /** As it was typed into the form. */
+  phone: string;
+};
+
 function SourceBadge({ source }: { source: CandidateSource }) {
   return (
     <span
@@ -68,6 +78,7 @@ export default function CandidatesBoard() {
   const [source, setSource] = useState<CandidateSource>("Uniq");
   const [company, setCompany] = useState("");
   const [busy, setBusy] = useState(false);
+  const [taken, setTaken] = useState<PhoneHolder | null>(null);
 
   // Polled so a token issued by one controller shows up for the others.
   const { data, error, loading, refresh } = usePolledResource<{
@@ -79,6 +90,7 @@ export default function CandidatesBoard() {
   async function createCandidate(event: React.FormEvent) {
     event.preventDefault();
     setNotice(null);
+    setTaken(null);
     setBusy(true);
 
     try {
@@ -93,6 +105,13 @@ export default function CandidatesBoard() {
         }),
       });
       const result = await response.json().catch(() => ({}));
+
+      // The number is already someone's: point at them, beside the form,
+      // rather than an error at the top of the page.
+      if (response.status === 409 && result.existing) {
+        setTaken({ ...result.existing, phone: phone.trim() });
+        return;
+      }
 
       if (!response.ok) {
         setNotice(result.error ?? "Could not create that candidate.");
@@ -223,6 +242,9 @@ export default function CandidatesBoard() {
 
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
+    // A number is found however it was written: "98400 10001" matches a
+    // record saved as "+91 9840010001".
+    const digits = term.replace(/\D/g, "");
     return records.filter((record) => {
       if (filter === "active" && !record.active) return false;
       if (filter === "disabled" && record.active) return false;
@@ -232,12 +254,21 @@ export default function CandidatesBoard() {
         record.token.toLowerCase().includes(term) ||
         (record.company ?? "").toLowerCase().includes(term) ||
         record.source.toLowerCase().includes(term) ||
-        (record.phone ?? "").includes(term)
+        (record.phone ?? "").includes(term) ||
+        (digits.length >= 4 &&
+          (record.phone ?? "").replace(/\D/g, "").includes(digits))
       );
     });
   }, [records, filter, search]);
 
   const activeCount = records.filter((record) => record.active).length;
+
+  // Read live from the roster, so "Enable token" takes effect in the message
+  // as soon as the list refreshes.
+  const takenRecord = taken
+    ? records.find((record) => record.id === taken.id)
+    : undefined;
+  const takenActive = takenRecord?.active ?? taken?.active ?? true;
 
   const visibleIds = visible.map((record) => record.id);
   const selectedVisible = visibleIds.filter((id) => selected.has(id));
@@ -326,14 +357,23 @@ export default function CandidatesBoard() {
               htmlFor="candidate-phone"
               className="block text-sm font-medium text-slate-700"
             >
-              Phone number
+              Phone number <span className="text-rose-600">*</span>
             </label>
+            {/* Required and unique: the number is how a candidate is told
+                apart from everyone else. */}
             <input
               id="candidate-phone"
               type="tel"
+              required
               maxLength={32}
+              autoComplete="off"
+              aria-invalid={taken ? true : undefined}
+              aria-describedby={taken ? "candidate-phone-taken" : undefined}
               value={phone}
-              onChange={(event) => setPhone(event.target.value)}
+              onChange={(event) => {
+                setPhone(event.target.value);
+                setTaken(null);
+              }}
               placeholder="e.g. +91 98765 43210"
               className={field}
             />
@@ -391,6 +431,53 @@ export default function CandidatesBoard() {
             </button>
           </div>
         </form>
+
+        {taken ? (
+          <div
+            id="candidate-phone-taken"
+            role="alert"
+            className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950"
+          >
+            <p className="min-w-0 flex-1 basis-60">
+              <span className="font-semibold">{taken.phone}</span> is already
+              registered to <span className="font-semibold">{taken.name}</span>
+              {" · token "}
+              <span className="font-mono font-bold tracking-wider">
+                {taken.token}
+              </span>
+              {takenActive ? "." : " (disabled)."} One number is one candidate:
+              {takenActive
+                ? " hand over that token instead."
+                : " enable that token instead of issuing a new one."}
+            </p>
+            <div className="flex w-full gap-2 sm:w-auto">
+              <button
+                type="button"
+                onClick={() => setHistoryId(taken.id)}
+                className="flex-1 rounded-lg border border-amber-400 bg-white px-3 py-2 text-xs font-semibold text-amber-900 transition hover:bg-amber-100 sm:flex-none sm:py-1.5"
+              >
+                View
+              </button>
+              {!takenActive && takenRecord ? (
+                <button
+                  type="button"
+                  onClick={() => toggle(takenRecord)}
+                  disabled={pendingId === takenRecord.id}
+                  className="flex-1 rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-700 disabled:opacity-60 sm:flex-none sm:py-1.5"
+                >
+                  Enable token
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setTaken(null)}
+                className="flex-1 rounded-lg border border-amber-400 px-3 py-2 text-xs font-semibold text-amber-900 transition hover:bg-amber-100 sm:flex-none sm:py-1.5"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {issued ? (
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3">

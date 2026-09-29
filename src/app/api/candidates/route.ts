@@ -1,4 +1,4 @@
-import { isUniqueViolation } from "@/lib/db";
+import { conflictConstraint, isUniqueViolation } from "@/lib/db";
 import {
   fail,
   forbidden,
@@ -11,13 +11,20 @@ import {
 import {
   deleteCandidates,
   describeCandidates,
+  findCandidateByPhoneKey,
   insertCandidate,
   listCandidateRecords,
   listCandidates,
   listPanels,
   setCandidatesActive,
+  type PhoneHolder,
 } from "@/lib/queries";
 import { AUDIT_ACTIONS, recordAudit } from "@/lib/audit";
+import {
+  CANDIDATE_PHONE_CONSTRAINT,
+  candidatePhoneError,
+  phoneKey,
+} from "@/lib/phone";
 import { getSession, isController } from "@/lib/session";
 import { generateToken } from "@/lib/tokens";
 import { isCandidateSource } from "@/lib/types";
@@ -32,8 +39,25 @@ function summariseNames(names: string[]): string {
   const shown = names.slice(0, NAMES_IN_SUMMARY).join(", ");
   return `${shown} and ${names.length - NAMES_IN_SUMMARY} more`;
 }
-const MAX_PHONE = 32;
 const MAX_COMPANY = 120;
+
+/**
+ * The number is already someone's. Says who, so the controller can hand over
+ * that token - or re-enable it - instead of creating the person twice.
+ */
+function phoneTaken(phone: string, holder: PhoneHolder) {
+  return json(
+    {
+      error:
+        `${phone} is already registered to ${holder.name} (token ${holder.token})` +
+        (holder.active
+          ? "."
+          : ", which is disabled. Enable that token instead of issuing a new one."),
+      existing: holder,
+    },
+    409,
+  );
+}
 
 /** Roster for the Candidates page and for booking on a candidate's behalf. */
 export async function GET() {
@@ -74,13 +98,15 @@ export async function POST(request: Request) {
       return fail(`Name must be ${MAX_NAME} characters or fewer.`, 400);
     }
 
+    // The phone number identifies the candidate, so it is required and it is
+    // unique. See src/lib/phone.ts for what counts as the same number.
     const phone = readString(body, "phone");
-    if (phone.length > MAX_PHONE) {
-      return fail(`Phone number must be ${MAX_PHONE} characters or fewer.`, 400);
-    }
-    if (phone && !/^[0-9+()\-\s]{6,}$/.test(phone)) {
-      return fail("Enter a valid phone number.", 400);
-    }
+    const phoneProblem = candidatePhoneError(phone);
+    if (phoneProblem) return fail(phoneProblem, 400);
+    const key = phoneKey(phone) as string;
+
+    const holder = await findCandidateByPhoneKey(key);
+    if (holder) return phoneTaken(phone, holder);
 
     // Absent means Uniq, so an older client still creates a usable record.
     const source = body.source === undefined ? "Uniq" : body.source;
@@ -102,7 +128,7 @@ export async function POST(request: Request) {
         const id = await insertCandidate({
           token,
           name,
-          phone: phone || null,
+          phone,
           source,
           company: company || null,
         });
@@ -118,7 +144,7 @@ export async function POST(request: Request) {
             candidateId: id,
             token,
             name,
-            phone: phone || null,
+            phone,
             source,
             company: company || null,
           },
@@ -129,13 +155,20 @@ export async function POST(request: Request) {
             id,
             token,
             name,
-            phone: phone || null,
+            phone,
             source,
             company: company || null,
           },
           201,
         );
       } catch (error) {
+        // Another controller registered the same number between the check
+        // above and this insert. The unique index settled it; say who won.
+        if (conflictConstraint(error) === CANDIDATE_PHONE_CONSTRAINT) {
+          const winner = await findCandidateByPhoneKey(key);
+          if (winner) return phoneTaken(phone, winner);
+        }
+        // Otherwise the only unique column left is the token: draw again.
         if (isUniqueViolation(error)) continue;
         throw error;
       }

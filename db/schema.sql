@@ -40,6 +40,8 @@ create table if not exists candidates (
   token       text        not null unique check (token ~ '^[A-Z0-9]{4}$'),
   name        text        not null,
   email       text,
+  -- Required and unique in practice: see "One candidate per phone number"
+  -- at the end of this file.
   phone       text,
   active      boolean     not null default true,
   created_at  timestamptz not null default now()
@@ -343,3 +345,73 @@ begin
   end if;
 end
 $candidate_source$;
+
+-- One candidate per phone number ---------------------------------------------
+-- The phone number is who a candidate is. It is kept as typed, for display;
+-- `phone_key` is what makes two spellings of it the same number. Only the
+-- digits count, and a leading 91 or 0 in front of a ten-digit Indian number is
+-- dropped, so "+91 98400 10001", "098400 10001" and "9840010001" are all
+-- 9840010001. src/lib/phone.ts makes the same reduction so the API can name
+-- who already holds a number; the index below is what enforces it, so two
+-- controllers registering one number at once cannot both succeed.
+alter table candidates add column if not exists phone_key text
+  generated always as (
+    nullif(
+      regexp_replace(
+        regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'),
+        '^(0091|91|0)([0-9]{10})$', '\2'),
+      '')
+  ) stored;
+
+-- Both guards are added only once the data already satisfies them, so this
+-- script still runs against a database holding duplicates. It names them
+-- instead, and nothing is merged or deleted automatically: which record
+-- survives, and whose bookings move to it, is a person's decision. Until the
+-- index exists the API still refuses a number that is already registered.
+do $candidate_phone$
+declare
+  clashes  text;
+  unusable text;
+begin
+  if not exists (
+    select 1 from pg_indexes where indexname = 'candidates_phone_unique'
+  ) then
+    select string_agg(format('%s held by %s', phone_key, holders), '; ')
+      into clashes
+      from (
+        select phone_key,
+               string_agg(format('%s %s', token, name), ', ' order by created_at) as holders
+          from candidates
+         where phone_key is not null
+         group by phone_key
+        having count(*) > 1
+      ) repeated;
+
+    if clashes is not null then
+      raise notice
+        'Skipping the unique phone index: these numbers belong to more than one candidate. Merge or correct them, then re-run this script. %',
+        clashes;
+    else
+      create unique index candidates_phone_unique on candidates (phone_key);
+    end if;
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint where conname = 'candidates_phone_required'
+  ) then
+    select string_agg(format('%s %s (%s)', token, name, coalesce(phone, 'no phone')), ', ')
+      into unusable
+      from candidates
+     where phone_key is null or phone_key !~ '^[0-9]{10,15}$';
+
+    if unusable is not null then
+      raise notice
+        'Skipping the phone-required check: these candidates have no usable phone number. Correct them, then re-run this script. %',
+        unusable;
+    else
+      alter table candidates add constraint candidates_phone_required
+        check (phone_key is not null and phone_key ~ '^[0-9]{10,15}$');
+    end if;
+  end if;
+end
+$candidate_phone$;
