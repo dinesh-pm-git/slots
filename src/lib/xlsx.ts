@@ -157,16 +157,16 @@ function buildZip(entries: ZipEntry[], now = new Date()): Uint8Array {
 
 export type SheetCell = string | number | null | undefined;
 
-/**
- * Builds a one-sheet workbook. Numbers are written as numbers so they sort and
- * total correctly; everything else becomes an inline string, which avoids a
- * shared-strings part altogether.
- */
-export function buildXlsx(
-  sheetName: string,
-  headers: string[],
-  rows: SheetCell[][],
-): Uint8Array {
+export type Sheet = {
+  name: string;
+  headers: string[];
+  rows: SheetCell[][];
+};
+
+const SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+function sheetXml({ headers, rows }: Sheet): string {
   const allRows: SheetCell[][] = [headers, ...rows];
 
   const sheetRows = allRows
@@ -198,49 +198,109 @@ export function buildXlsx(
     })
     .join("");
 
-  // Excel rejects a sheet name over 31 chars or containing : \ / ? * [ ]
-  const safeName = xmlEscape(sheetName.replace(/[:\\/?*[\]]/g, " ").slice(0, 31));
+  // An empty <cols/> is invalid, so a sheet without headers has none.
+  const cols = widths ? `<cols>${widths}</cols>` : "";
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="${SHEET_NS}">${cols}<sheetData>${sheetRows}</sheetData></worksheet>`;
+}
+
+/**
+ * Excel rejects a sheet name over 31 characters, one containing : \ / ? * [ ],
+ * and two sheets whose names differ only in case.
+ */
+function sheetNames(sheets: Sheet[]): string[] {
+  const seen = new Set<string>();
+  return sheets.map((sheet, index) => {
+    const base =
+      sheet.name.replace(/[:\\/?*[\]]/g, " ").trim().slice(0, 31) ||
+      `Sheet${index + 1}`;
+    let name = base;
+    for (let n = 2; seen.has(name.toLowerCase()); n += 1) {
+      const suffix = ` (${n})`;
+      name = base.slice(0, 31 - suffix.length) + suffix;
+    }
+    seen.add(name.toLowerCase());
+    return name;
+  });
+}
+
+/**
+ * Builds a workbook with one sheet per entry, in order. Numbers are written as
+ * numbers so they sort and total correctly; everything else becomes an inline
+ * string, which avoids a shared-strings part altogether.
+ */
+export function buildWorkbook(sheets: Sheet[]): Uint8Array {
+  if (sheets.length === 0) throw new Error("A workbook needs a sheet.");
+
+  const names = sheetNames(sheets);
+  const numbers = sheets.map((_, index) => index + 1);
+  const stylesId = sheets.length + 1;
 
   const entries: ZipEntry[] = [
     {
       name: "[Content_Types].xml",
       data: textBytes(
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${numbers
+          .map(
+            (n) =>
+              `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
+          )
+          .join(
+            "",
+          )}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
       ),
     },
     {
       name: "_rels/.rels",
       data: textBytes(
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
       ),
     },
     {
       name: "xl/workbook.xml",
       data: textBytes(
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${safeName}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="${SHEET_NS}" xmlns:r="${REL_NS}"><sheets>${numbers
+          .map(
+            (n) =>
+              `<sheet name="${xmlEscape(names[n - 1])}" sheetId="${n}" r:id="rId${n}"/>`,
+          )
+          .join("")}</sheets></workbook>`,
       ),
     },
     {
       name: "xl/_rels/workbook.xml.rels",
       data: textBytes(
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${numbers
+          .map(
+            (n) =>
+              `<Relationship Id="rId${n}" Type="${REL_NS}/worksheet" Target="worksheets/sheet${n}.xml"/>`,
+          )
+          .join(
+            "",
+          )}<Relationship Id="rId${stylesId}" Type="${REL_NS}/styles" Target="styles.xml"/></Relationships>`,
       ),
     },
     {
       name: "xl/styles.xml",
       data: textBytes(
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="${SHEET_NS}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`,
       ),
     },
-    {
-      name: "xl/worksheets/sheet1.xml",
-      data: textBytes(
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${widths}</cols><sheetData>${sheetRows}</sheetData></worksheet>`,
-      ),
-    },
+    ...sheets.map((sheet, index) => ({
+      name: `xl/worksheets/sheet${index + 1}.xml`,
+      data: textBytes(sheetXml(sheet)),
+    })),
   ];
 
   return buildZip(entries);
+}
+
+/** A one-sheet workbook. */
+export function buildXlsx(
+  sheetName: string,
+  headers: string[],
+  rows: SheetCell[][],
+): Uint8Array {
+  return buildWorkbook([{ name: sheetName, headers, rows }]);
 }
 
 /** RFC 4180 CSV. Excel needs the BOM to read UTF-8 correctly. */

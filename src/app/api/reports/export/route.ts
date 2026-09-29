@@ -1,0 +1,242 @@
+import { fail, forbidden, serverError, unauthorized } from "@/lib/http";
+import { percent, rangeLabel } from "@/lib/report-format";
+import { buildReport, resolveReportRange } from "@/lib/reports";
+import { getSession, isController } from "@/lib/session";
+import {
+  SCHEDULE_LOCALE,
+  SCHEDULE_TIMEZONE,
+  SLOT_MINUTES,
+  sessionEndLabel,
+  sessionRangeLabel,
+  slotStartLabel,
+} from "@/lib/time";
+import { buildCsv, buildWorkbook, type Sheet, type SheetCell } from "@/lib/xlsx";
+
+const SESSION_HEADERS = [
+  "Date",
+  "Start",
+  "End",
+  "Minutes",
+  "Panel",
+  "Candidate",
+  "Token",
+  "Source",
+  "Company",
+  "Type",
+  "Status",
+  "Booked by",
+  "Recruiter phone",
+  "Recruiter email",
+  "Mock done",
+  "Held",
+];
+
+const yesNo = (value: boolean) => (value ? "Yes" : "No");
+
+/**
+ * Download the report. Excel carries every table on the page as its own sheet,
+ * plus every session in the range; CSV is that session list alone, since a
+ * CSV file holds one table. Controller only.
+ */
+export async function GET(request: Request) {
+  try {
+    const session = await getSession();
+    if (!session) return unauthorized();
+    if (!isController(session)) return forbidden();
+
+    const params = new URL(request.url).searchParams;
+    const format = (params.get("format") ?? "xlsx").toLowerCase();
+    if (format !== "csv" && format !== "xlsx") {
+      return fail("Format must be csv or xlsx.", 400);
+    }
+
+    const range = await resolveReportRange(params);
+    if ("error" in range) return fail(range.error, 400);
+
+    const { report, sessions } = await buildReport(range.from, range.to);
+    const { totals } = report;
+
+    const sessionRows: SheetCell[][] = sessions.map((row) => [
+      row.date,
+      slotStartLabel(row.slotIndex),
+      sessionEndLabel(row.slotIndex, row.slotCount),
+      row.slotCount * SLOT_MINUTES,
+      row.panelLabel,
+      row.candidateName,
+      row.token,
+      row.source,
+      row.companyName,
+      row.sessionType,
+      row.status === "booked" ? "Booked" : "Cancelled",
+      row.bookedBy === "candidate" ? "Candidate" : "Controller",
+      row.recruiterPhone ?? "",
+      row.recruiterEmail ?? "",
+      yesNo(row.mockDone),
+      yesNo(row.held),
+    ]);
+
+    const filename = `report-${range.from}-to-${range.to}.${format}`;
+    const disposition = `attachment; filename="${filename}"`;
+
+    if (format === "csv") {
+      return new Response(buildCsv(SESSION_HEADERS, sessionRows), {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": disposition,
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
+    const generated = new Intl.DateTimeFormat(SCHEDULE_LOCALE, {
+      timeZone: SCHEDULE_TIMEZONE,
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date());
+
+    const summary: SheetCell[][] = [
+      ["Dates", rangeLabel(report.from, report.to)],
+      ["Generated", `${generated} by ${session.name}`],
+      ["Sessions held", totals.held],
+      ["Sessions still to come", totals.scheduled],
+      ["Interviews", totals.interviews],
+      ["Assessments", totals.assessments],
+      ["Hours booked", totals.hours],
+      ["Candidates", totals.candidates],
+      ["Candidates from Uniq", totals.candidatesUniq],
+      ["Candidates direct", totals.candidatesDirect],
+      ["Companies", totals.companies],
+      ["Held with a mock", totals.heldWithMock],
+      ["Held without a mock", totals.heldWithoutMock],
+      ["Mock cover (%)", percent(totals.heldWithMock, totals.held)],
+      ["Cancelled", totals.cancelled],
+      ["Booked by candidates", totals.bookedByCandidates],
+      ["Booked by controllers", totals.bookedByControllers],
+      ["Days with sessions", totals.activeDays],
+      ["Bookable panel hours on those days", totals.bookableHours],
+      ["Panel use (%)", percent(totals.hours, totals.bookableHours)],
+    ];
+
+    const sheets: Sheet[] = [
+      { name: "Summary", headers: ["Measure", "Value"], rows: summary },
+      {
+        name: report.bucket === "week" ? "By week" : "By day",
+        headers: [
+          report.bucket === "week" ? "Week of" : "Date",
+          "Held",
+          "Still to come",
+          "Interviews",
+          "Assessments",
+          "Without mock",
+          "Cancelled",
+        ],
+        rows: report.timeline.map((point) => [
+          point.start,
+          point.held,
+          point.scheduled,
+          point.interviews,
+          point.assessments,
+          point.noMock,
+          point.cancelled,
+        ]),
+      },
+      {
+        name: "By hour",
+        headers: ["Starting", "Sessions"],
+        rows: report.hours.map((point) => [
+          `${point.hour % 12 === 0 ? 12 : point.hour % 12}:00 ${point.hour < 12 ? "AM" : "PM"}`,
+          point.sessions,
+        ]),
+      },
+      {
+        name: "Companies",
+        headers: [
+          "Company",
+          "Sessions",
+          "Interviews",
+          "Assessments",
+          "Candidates",
+          "Without mock",
+          "Cancelled",
+        ],
+        rows: report.companies.map((company) => [
+          company.name,
+          company.sessions,
+          company.interviews,
+          company.assessments,
+          company.candidates,
+          company.noMock,
+          company.cancelled,
+        ]),
+      },
+      {
+        name: "Panels",
+        headers: [
+          "Panel",
+          "Sessions",
+          "Hours booked",
+          "Bookable hours",
+          "Use (%)",
+          "Days closed",
+        ],
+        rows: report.panels.map((panel) => [
+          panel.label,
+          panel.sessions,
+          panel.hours,
+          panel.bookableHours,
+          percent(panel.hours, panel.bookableHours),
+          panel.closedDays,
+        ]),
+      },
+      {
+        name: "Controllers",
+        headers: [
+          "Controller",
+          "Tokens issued",
+          "Sessions booked",
+          "Sessions moved",
+          "Sessions cancelled",
+          "Mocks ticked",
+          "Panels closed",
+          "Sign-ins",
+        ],
+        rows: report.controllers.map((line) => [
+          line.name,
+          line.tokensIssued,
+          line.sessionsBooked,
+          line.sessionsMoved,
+          line.sessionsCancelled,
+          line.mocksTicked,
+          line.panelsClosed,
+          line.signIns,
+        ]),
+      },
+      {
+        name: "Without mock",
+        headers: ["Date", "Time", "Candidate", "Token", "Company", "Type", "Panel"],
+        rows: report.noMock.map((line) => [
+          line.date,
+          sessionRangeLabel(line.slotIndex, line.slotCount),
+          line.candidateName,
+          line.token,
+          line.companyName,
+          line.sessionType,
+          line.panelLabel,
+        ]),
+      },
+      { name: "Sessions", headers: SESSION_HEADERS, rows: sessionRows },
+    ];
+
+    const workbook = buildWorkbook(sheets);
+    return new Response(workbook as unknown as BodyInit, {
+      headers: {
+        "Content-Type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": disposition,
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (error) {
+    return serverError(error);
+  }
+}

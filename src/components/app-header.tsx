@@ -61,6 +61,15 @@ const CONTROLLER_LINKS: NavLink[] = [
     ),
   },
   {
+    href: "/reports",
+    label: "Reports",
+    icon: (
+      <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={ICON}>
+        <path d="M4 20.5h16M7 17V11M12 17V6.5M17 17v-4" />
+      </svg>
+    ),
+  },
+  {
     href: "/audit",
     label: "Audit Logs",
     icon: (
@@ -75,10 +84,11 @@ const CONTROLLER_LINKS: NavLink[] = [
 /**
  * App chrome.
  *
- * On a phone the header is one slim bar and nothing more: the app name opens
- * the list of sections, and the account initial opens password and sign-out.
- * Nothing is pinned to the bottom of the screen, which is given to the
- * content. The same header on a laptop keeps everything inline.
+ * On a phone or tablet the header is one slim bar and nothing more: the app
+ * name opens the list of sections, and the account initial opens password and
+ * sign-out. Nothing is pinned to the bottom of the screen, which is given to
+ * the content. From laptop width (lg) everything is inline - six sections, the
+ * name and two buttons do not fit one row any narrower.
  */
 export default function AppHeader({ role, displayName }: Props) {
   const router = useRouter();
@@ -128,7 +138,7 @@ export default function AppHeader({ role, displayName }: Props) {
               }}
               aria-haspopup="menu"
               aria-expanded={navOpen}
-              className="-ml-2 flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-sm font-semibold tracking-tight transition active:bg-slate-800 md:hidden"
+              className="-ml-2 flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-sm font-semibold tracking-tight transition active:bg-slate-800 lg:hidden"
             >
               <span
                 aria-hidden
@@ -160,7 +170,7 @@ export default function AppHeader({ role, displayName }: Props) {
 
           <span
             className={`shrink-0 items-center gap-2 text-sm font-semibold tracking-tight ${
-              links.length > 0 ? "hidden md:flex" : "flex"
+              links.length > 0 ? "hidden lg:flex" : "flex"
             }`}
           >
             <span
@@ -171,7 +181,7 @@ export default function AppHeader({ role, displayName }: Props) {
           </span>
 
           {links.length > 0 ? (
-            <nav aria-label="Sections" className="hidden items-center gap-1 md:flex">
+            <nav aria-label="Sections" className="hidden items-center gap-1 lg:flex">
               {links.map((link) => (
                 <Link
                   key={link.href}
@@ -190,7 +200,7 @@ export default function AppHeader({ role, displayName }: Props) {
           ) : null}
 
           {/* Laptop: everything inline. */}
-          <div className="ml-auto hidden items-center gap-2 md:flex">
+          <div className="ml-auto hidden items-center gap-2 lg:flex">
             <span className="text-sm text-slate-300">
               {displayName}
               <span className="ml-2 rounded-full bg-slate-700 px-2 py-0.5 text-xs font-medium text-slate-200 capitalize">
@@ -219,7 +229,7 @@ export default function AppHeader({ role, displayName }: Props) {
           </div>
 
           {/* Phone: one button, which opens the account actions. */}
-          <div className="relative ml-auto md:hidden">
+          <div className="relative ml-auto lg:hidden">
             <button
               type="button"
               onClick={() => {
@@ -291,11 +301,11 @@ export default function AppHeader({ role, displayName }: Props) {
             aria-label="Close menu"
             tabIndex={-1}
             onClick={() => setNavOpen(false)}
-            className="no-print fixed inset-x-0 top-14 bottom-0 z-30 cursor-default bg-slate-900/40 md:hidden"
+            className="no-print fixed inset-x-0 top-14 bottom-0 z-30 cursor-default bg-slate-900/40 lg:hidden"
           />
           <nav
             aria-label="Sections"
-            className="no-print fixed inset-x-0 top-14 z-40 border-b border-slate-200 bg-white p-2 shadow-xl md:hidden"
+            className="no-print fixed inset-x-0 top-14 z-40 border-b border-slate-200 bg-white p-2 shadow-xl lg:hidden"
           >
             {links.map((link) => {
               const active = isActive(link.href);
